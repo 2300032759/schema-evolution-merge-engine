@@ -1,25 +1,27 @@
 import os
 import sqlite3
-from typing import Any, Dict, List, Optional
 import duckdb
+from typing import Any, Dict, List
 from backend.models import ColumnDef, TableSchema
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-SQLITE_PATH = os.path.join(DATA_DIR, "source_oltp.db")
-DUCKDB_PATH = os.path.join(DATA_DIR, "target_olap.duckdb")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+SOURCE_DB_PATH = os.path.join(DATA_DIR, "source_oltp.db")
+TARGET_DB_PATH = os.path.join(DATA_DIR, "target_warehouse.duckdb")
 
 
 def normalize_sql_type(raw_type: str) -> str:
-    t = (raw_type or "TEXT").strip().upper()
-    if any(k in t for k in ("BIGINT", "INT8", "INT64")):
+    t = raw_type.strip().upper()
+    if any(k in t for k in ["BIGINT", "INT64", "LONG"]):
         return "INT64"
-    if any(k in t for k in ("INT", "SERIAL", "SHORT", "BYTE")):
+    if any(k in t for k in ["INT", "INTEGER", "SMALLINT", "TINYINT"]):
         return "INT32"
-    if any(k in t for k in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):
+    if any(k in t for k in ["DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC"]):
         return "FLOAT64"
-    if "BOOL" in t:
+    if any(k in t for k in ["BOOL"]):
         return "BOOLEAN"
-    if "TIMESTAMP" in t or "DATETIME" in t:
+    if any(k in t for k in ["TIMESTAMP", "DATETIME"]):
         return "TIMESTAMP"
     if "DATE" in t:
         return "DATE"
@@ -27,134 +29,89 @@ def normalize_sql_type(raw_type: str) -> str:
 
 
 class WarehouseManager:
-    def __init__(self, sqlite_path: str = SQLITE_PATH, duckdb_path: str = DUCKDB_PATH):
-        os.makedirs(os.path.dirname(sqlite_path), exist_ok=True)
-        self.sqlite_path = sqlite_path
-        self.duckdb_path = duckdb_path
+    def __init__(self, source_path: str = SOURCE_DB_PATH, target_path: str = TARGET_DB_PATH):
+        self.source_path = source_path
+        self.target_path = target_path
 
     def get_source_conn(self) -> sqlite3.Connection:
-        con = sqlite3.connect(self.sqlite_path)
-        con.row_factory = sqlite3.Row
-        return con
+        conn = sqlite3.connect(self.source_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def get_target_conn(self) -> duckdb.DuckDBPyConnection:
-        return duckdb.connect(self.duckdb_path)
-
-    def reset_demo_warehouses(self) -> None:
-        if os.path.exists(self.sqlite_path):
-            os.remove(self.sqlite_path)
-        if os.path.exists(self.duckdb_path):
-            os.remove(self.duckdb_path)
-
-        with self.get_source_conn() as scon:
-            scon.execute("""
-                CREATE TABLE orders (
-                    order_id INTEGER PRIMARY KEY,
-                    customer_email TEXT NOT NULL,
-                    region_code TEXT NOT NULL,
-                    order_amount INTEGER NOT NULL,
-                    order_status TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            seed_rows = [
-                (1001, "arjun.rao@klef.in", "SOUTH", 1200, "DELIVERED", "2026-01-10T09:00:00"),
-                (1002, "priya.nair@klef.in", "WEST", 2450, "SHIPPED", "2026-01-10T09:15:00"),
-                (1003, "karthik.v@klef.in", "NORTH", 890, "PROCESSING", "2026-01-10T09:30:00"),
-                (1004, "meera.iyer@klef.in", "EAST", 3100, "DELIVERED", "2026-01-10T09:45:00"),
-            ]
-            scon.executemany(
-                "INSERT INTO orders VALUES (?, ?, ?, ?, ?, ?)",
-                seed_rows,
-            )
-            scon.commit()
-
-        dcon = self.get_target_conn()
-        try:
-            dcon.execute("""
-                CREATE TABLE orders (
-                    order_id INTEGER PRIMARY KEY,
-                    customer_email VARCHAR NOT NULL,
-                    region_code VARCHAR NOT NULL,
-                    order_amount INTEGER NOT NULL,
-                    order_status VARCHAR NOT NULL,
-                    updated_at TIMESTAMP NOT NULL
-                )
-            """)
-            dcon.execute("""
-                CREATE VIEW vw_regional_revenue AS
-                SELECT region_code, COUNT(*) AS total_orders, SUM(order_amount) AS gross_revenue
-                FROM orders
-                GROUP BY region_code
-            """)
-        finally:
-            dcon.close()
+        return duckdb.connect(self.target_path)
 
     def inspect_source_schema(self, table_name: str) -> TableSchema:
-        with self.get_source_conn() as scon:
-            rows = scon.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+        conn = self.get_source_conn()
+        try:
+            cursor = conn.execute(f"PRAGMA table_info({table_name})")
+            rows = cursor.fetchall()
             if not rows:
                 raise ValueError(f"Source table '{table_name}' does not exist.")
-            count = scon.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
             cols = [
                 ColumnDef(
                     name=r["name"],
-                    raw_type=r["type"] or "TEXT",
-                    normalized_type=normalize_sql_type(r["type"]),
-                    nullable=not bool(r["notnull"]),
-                    primary_key=bool(r["pk"]),
-                    default_value=r["dflt_value"],
+                    data_type=r["type"] or "TEXT",
+                    normalized_type=normalize_sql_type(r["type"] or "TEXT"),
+                    nullable=(r["notnull"] == 0 and r["pk"] == 0),
+                    is_primary_key=(r["pk"] > 0),
                 )
                 for r in rows
             ]
-            return TableSchema(database="SQLite_OLTP", table_name=table_name, columns=cols, row_count=count)
+            return TableSchema(warehouse="Source_OLTP_SQLite", table_name=table_name, columns=cols)
+        finally:
+            conn.close()
 
     def inspect_target_schema(self, table_name: str) -> TableSchema:
-        dcon = self.get_target_conn()
+        con = self.get_target_conn()
         try:
-            exists = dcon.execute(
+            exists = con.execute(
                 "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
                 [table_name],
             ).fetchone()[0]
             if not exists:
-                raise ValueError(f"Target table '{table_name}' does not exist.")
-            rows = dcon.execute(f"PRAGMA table_info('{table_name}')").fetchall()
-            count = dcon.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                return TableSchema(warehouse="Target_OLAP_DuckDB", table_name=table_name, columns=[])
+
+            info = con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
             cols = [
                 ColumnDef(
-                    name=r[1],
-                    raw_type=r[2],
-                    normalized_type=normalize_sql_type(r[2]),
-                    nullable=not bool(r[3]),
-                    primary_key=bool(r[5]),
-                    default_value=str(r[4]) if r[4] is not None else None,
+                    name=row[1],
+                    data_type=row[2],
+                    normalized_type=normalize_sql_type(row[2]),
+                    nullable=(not row[3] and not row[5]),
+                    is_primary_key=bool(row[5]),
                 )
-                for r in rows
+                for row in info
             ]
-            return TableSchema(database="DuckDB_OLAP", table_name=table_name, columns=cols, row_count=count)
+            return TableSchema(warehouse="Target_OLAP_DuckDB", table_name=table_name, columns=cols)
         finally:
-            dcon.close()
+            con.close()
 
-    def inspect_target_views(self) -> List[Dict[str, str]]:
-        """Dynamically introspects all user-defined SQL views in DuckDB catalog."""
-        dcon = self.get_target_conn()
+    def fetch_source_incremental(self, table_name: str, watermark_col: str, last_watermark: str | None) -> List[Dict[str, Any]]:
+        conn = self.get_source_conn()
         try:
-            rows = dcon.execute(
-                "SELECT view_name, sql FROM duckdb_views() WHERE internal = false"
-            ).fetchall()
-            return [{"view_name": r[0], "sql": r[1] or ""} for r in rows]
-        finally:
-            dcon.close()
-
-    def fetch_source_incremental(
-        self, table_name: str, watermark_col: str, last_watermark: Optional[str]
-    ) -> List[Dict[str, Any]]:
-        with self.get_source_conn() as scon:
             if last_watermark:
-                cur = scon.execute(
+                cur = conn.execute(
                     f"SELECT * FROM {table_name} WHERE {watermark_col} > ? ORDER BY {watermark_col} ASC",
                     (last_watermark,),
                 )
             else:
-                cur = scon.execute(f"SELECT * FROM {table_name} ORDER BY {watermark_col} ASC")
-            return [dict(r) for r in cur.fetchall()]
+                cur = conn.execute(f"SELECT * FROM {table_name} ORDER BY {watermark_col} ASC")
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            conn.close()
+
+    def fetch_target_rows(self, table_name: str, limit: int = 50) -> List[Dict[str, Any]]:
+        con = self.get_target_conn()
+        try:
+            exists = con.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+                [table_name],
+            ).fetchone()[0]
+            if not exists:
+                return []
+            res = con.execute(f"SELECT * FROM {table_name} LIMIT {limit}")
+            cols = [desc[0] for desc in res.description]
+            return [dict(zip(cols, row)) for row in res.fetchall()]
+        finally:
+            con.close()

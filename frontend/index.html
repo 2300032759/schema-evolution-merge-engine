@@ -3,295 +3,238 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Intelligent Schema-Evolution & Cross-Warehouse Merge Engine</title>
-  <style>
-    :root {
-      --bg: #0b1120;
-      --panel: #111827;
-      --border: #1f2937;
-      --text: #f3f4f6;
-      --muted: #9ca3af;
-      --accent: #3b82f6;
-      --safe: #10b981;
-      --warn: #f59e0b;
-      --break: #ef4444;
-    }
-    * { box-sizing: border-box; font-family: 'Segoe UI', system-ui, sans-serif; }
-    body { margin: 0; background: var(--bg); color: var(--text); padding: 20px; }
-    header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 18px; flex-wrap: wrap; gap: 10px; }
-    h1 { font-size: 1.25rem; margin: 0; }
-    .subtitle { color: var(--muted); font-size: 0.85rem; margin-top: 3px; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
-    button, select {
-      background: #1e293b; color: var(--text); border: 1px solid #334155;
-      padding: 8px 13px; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.82rem;
-    }
-    button:hover { background: #334155; }
-    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    button.danger { background: #7f1d1d; border-color: #991b1b; }
-    button.success { background: #065f46; border-color: #047857; }
-    .alert-banner { padding: 11px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.86rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
-    .alert-SAFE { background: #064e3b; border: 1px solid var(--safe); color: #a7f3d0; }
-    .alert-WARNING { background: #78350f; border: 1px solid var(--warn); color: #fde68a; }
-    .alert-BREAKING { background: #7f1d1d; border: 1px solid var(--break); color: #fecaca; }
-    .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
-    .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
-    .kpi-label { color: var(--muted); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.04em; }
-    .kpi-val { font-size: 1.45rem; font-weight: 700; margin-top: 4px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 15px; }
-    .card h2 { font-size: 0.96rem; margin: 0 0 10px 0; color: #e5e7eb; display: flex; justify-content: space-between; align-items: center; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    .badge { padding: 2px 8px; border-radius: 999px; font-size: 0.73rem; font-weight: 700; }
-    .SAFE, .SUCCESS { background: #064e3b; color: #6ee7b7; }
-    .WARNING { background: #78350f; color: #fcd34d; }
-    .BREAKING, .QUARANTINED_SCHEMA_DRIFT { background: #7f1d1d; color: #fca5a5; }
-    .rec-box { background: #0f172a; border-left: 3px solid var(--accent); padding: 9px 12px; margin-bottom: 8px; border-radius: 4px; font-size: 0.83rem; }
-    .bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 0.8rem; }
-    .bar-track { flex: 1; background: #1e293b; height: 14px; border-radius: 6px; overflow: hidden; }
-    .bar-fill { height: 100%; background: var(--accent); transition: width 0.3s; }
-    @media (max-width: 900px) { .kpi-grid, .grid { grid-template-columns: 1fr; } }
-  </style>
+  <title>Schema-Evolution & Cross-Warehouse Merge Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-  <header>
-    <div>
-      <h1>Intelligent Schema-Evolution &amp; Cross-Warehouse Merge Engine</h1>
-      <div class="subtitle">SQLite (OLTP) &rarr; DuckDB (OLAP) | Real-Time Drift Detection, Quality Validation, Version Comparison &amp; Automated Reporting</div>
-    </div>
-    <div style="display:flex; gap:8px; align-items:center;">
-      <span id="active-version" class="badge SAFE">Active: v1.0.0</span>
-      <a href="/api/report/orders" download="orders_governance_report.json">
-        <button class="success">Download Automated Report</button>
-      </a>
-    </div>
-  </header>
-
-  <div id="alert-banner" class="alert-banner alert-SAFE">
-    <span id="alert-text">System Initialized: Source and Target schemas synchronized.</span>
-    <span id="wm-badge" style="font-family:monospace;">Watermark: None</span>
-  </div>
-
-  <div class="toolbar">
-    <button onclick="runScenario('reset')">1. Reset Baseline (v1)</button>
-    <button onclick="runScenario('safe_evolution')">2A. Simulate Safe Drift</button>
-    <button onclick="runScenario('breaking_drift')">2B. Simulate Breaking Drift</button>
-    <button class="primary" onclick="runMerge('STRICT')">3. Execute Safe Merge (STRICT)</button>
-    <button class="danger" onclick="runMerge('FORCE_OVERRIDE')">Force Override &amp; Map</button>
-  </div>
-
-  <div class="kpi-grid">
-    <div class="kpi">
-      <div class="kpi-label">Schema Drift Severity</div>
-      <div class="kpi-val" id="kpi-severity">SAFE</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Data Quality Score</div>
-      <div class="kpi-val" id="kpi-dq" style="color:var(--safe);">100.0%</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Last Merge Latency</div>
-      <div class="kpi-val" id="kpi-latency">0.0 ms</div>
-    </div>
-    <div class="kpi">
-      <div class="kpi-label">Target Warehouse Rows</div>
-      <div class="kpi-val" id="kpi-rows">0</div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Source OLTP Schema (SQLite) <span id="src-rows" class="subtitle"></span></h2>
-      <table id="src-table"><thead><tr><th>Column</th><th>Raw Type</th><th>Canonical</th><th>PK</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="card">
-      <h2>Target OLAP Schema (DuckDB) <span id="tgt-rows" class="subtitle"></span></h2>
-      <table id="tgt-table"><thead><tr><th>Column</th><th>Raw Type</th><th>Canonical</th><th>PK</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Detected Schema Drift &amp; Dependency Impact</h2>
-      <table id="diff-table"><thead><tr><th>Change</th><th>Column(s)</th><th>Type Shift</th><th>Risk</th><th>Severity</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="card">
-      <h2>Automated Remediation Recommendations <button id="apply-rec-btn" class="primary" style="display:none; padding:4px 10px;" onclick="applyRecommendedMappings()">Apply Recommended Mapping &amp; Merge</button></h2>
-      <div id="rec-list"></div>
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <h2>Side-by-Side Schema Version Comparison</h2>
-      <div style="display:flex; gap:8px; margin-bottom:10px;">
-        <select id="cmp-v1"></select>
-        <span style="align-self:center; color:var(--muted);">vs</span>
-        <select id="cmp-v2"></select>
-        <button onclick="compareVersions()">Compare</button>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <div class="max-w-7xl mx-auto px-6 py-8">
+    <!-- Header -->
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between border-b border-slate-800 pb-6 mb-8 gap-4">
+      <div>
+        
+        <h1 class="text-2xl md:text-3xl font-bold text-white mt-1">Intelligent Schema-Evolution & Cross-Warehouse Merge Engine</h1>
+        <p class="text-slate-400 text-sm mt-1">Source OLTP (SQLite) &rarr; Diff &amp; Risk Policy Gate &rarr; Target OLAP Warehouse (DuckDB)</p>
       </div>
-      <div id="cmp-result" style="font-size:0.83rem; color:var(--muted);">Select two versions to inspect structural differences.</div>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="resetDemo()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-medium border border-slate-700">1. Reset Baseline (v1)</button>
+        <button onclick="simulate('safe_evolution')" class="px-4 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/40 text-sm font-medium">2A. Simulate Safe Drift</button>
+        <button onclick="simulate('breaking_drift')" class="px-4 py-2 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 text-sm font-medium">2B. Simulate Breaking Drift</button>
+      </div>
     </div>
-    <div class="card">
-      <h2>Pipeline Throughput &amp; Latency Monitor (Recent Batches)</h2>
-      <div id="perf-bars"><div class="subtitle">Execute a merge to record pipeline latency telemetry.</div></div>
+
+    <!-- Banner Notification -->
+    <div id="banner" class="hidden mb-6 p-4 rounded-xl border text-sm"></div>
+
+    <!-- Top Metrics -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Active Schema Version</div>
+        <div id="metric-version" class="text-2xl font-bold text-indigo-400 mt-1">v1.0.0</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Overall Drift Risk</div>
+        <div id="metric-risk" class="text-2xl font-bold text-emerald-400 mt-1">LOW (0)</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Detected Changes</div>
+        <div id="metric-changes" class="text-2xl font-bold text-white mt-1">0</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Target Warehouse Rows</div>
+        <div id="metric-rows" class="text-2xl font-bold text-cyan-400 mt-1">0</div>
+      </div>
     </div>
-  </div>
 
-  <div class="card">
-    <h2>Immutable Schema Version Registry &amp; Rollback</h2>
-    <table id="ver-table"><thead><tr><th>Version</th><th>SHA-256 Hash</th><th>Columns</th><th>Created At</th><th>Action</th></tr></thead><tbody></tbody></table>
-  </div>
+    <!-- Schemas Side-by-Side -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Source OLTP Schema (<code class="text-indigo-400">orders</code>)</h2>
+        <div id="source-schema" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Target DuckDB Warehouse Schema (<code class="text-cyan-400">orders</code>)</h2>
+        <div id="target-schema" class="space-y-2 text-sm"></div>
+      </div>
+    </div>
 
-  <div class="card" style="margin-top:16px;">
-    <h2>Execution &amp; Data Quality Audit Log</h2>
-    <table id="audit-table"><thead><tr><th>Batch ID</th><th>Version</th><th>Status</th><th>Ins / Upd / Quar</th><th>DQ Score</th><th>Latency</th><th>Notes</th></tr></thead><tbody></tbody></table>
+    <!-- Schema Diff & Risk Impact Analysis -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-8">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Detected Schema Changes, Risk Scoring &amp; Impact Analysis</h2>
+          <p id="impacted-views" class="text-xs text-amber-400 mt-1">Downstream Impacted Assets: None</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="runMerge('STRICT_BLOCK_BREAKING')" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold">3. Execute Safe Incremental Merge</button>
+          <button onclick="runMerge('FORCE_OVERRIDE')" class="px-4 py-2 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 text-sm font-medium">Force Override &amp; Map</button>
+        </div>
+      </div>
+      <div id="changes-list" class="space-y-3 text-sm text-slate-300">No schema drift detected.</div>
+    </div>
+
+    <!-- Schema Version History & Target Data Preview -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Immutable Schema Registry &amp; Rollback</h2>
+        <div id="versions-list" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 overflow-x-auto">
+        <h2 class="text-lg font-semibold text-white mb-3">Target Warehouse Live Data (<code class="text-cyan-400">DuckDB</code>)</h2>
+        <div id="target-data" class="text-xs"></div>
+      </div>
+    </div>
+
+    <!-- Audit Log -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+      <h2 class="text-lg font-semibold text-white mb-4">Incremental Merge &amp; Policy Audit Log</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead class="text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="py-2 pr-3">Batch ID</th>
+              <th class="py-2 pr-3">Status</th>
+              <th class="py-2 pr-3">Schema Ver</th>
+              <th class="py-2 pr-3">Read / Ins / Upd</th>
+              <th class="py-2 pr-3">Latency</th>
+              <th class="py-2 pr-3">Checksum</th>
+              <th class="py-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody id="audit-body" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <script>
-    let latestSuggestedMappings = {};
+    function showBanner(msg, type = 'info') {
+      const b = document.getElementById('banner');
+      b.className = 'mb-6 p-4 rounded-xl border text-sm ' + (
+        type === 'error' ? 'bg-rose-950/60 border-rose-700 text-rose-200' :
+        type === 'success' ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200' :
+        'bg-indigo-950/60 border-indigo-700 text-indigo-200'
+      );
+      b.textContent = msg;
+      b.classList.remove('hidden');
+    }
 
     async function refreshAll() {
-      const [inspectRes, verRes, auditRes] = await Promise.all([
-        fetch('/api/inspect/orders').then(r => r.json()),
-        fetch('/api/versions/orders').then(r => r.json()),
-        fetch('/api/audit').then(r => r.json())
+      const [anaRes, stateRes] = await Promise.all([
+        fetch('/api/analyze/orders'),
+        fetch('/api/state/orders')
       ]);
+      const ana = await anaRes.json();
+      const state = await stateRes.json();
 
-      const { source_schema, target_schema, impact_report, active_version, watermark } = inspectRes;
-      document.getElementById('active-version').textContent = `Active: ${active_version ? active_version.version_id : 'v1.0.0'}`;
-      document.getElementById('wm-badge').textContent = `Watermark: ${watermark || 'None'}`;
-      document.getElementById('src-rows').textContent = `${source_schema.row_count} rows`;
-      document.getElementById('tgt-rows').textContent = `${target_schema.row_count} rows`;
-      document.getElementById('kpi-rows').textContent = target_schema.row_count;
-      document.getElementById('kpi-severity').textContent = impact_report.overall_severity;
+      const activeVer = state.versions.find(v => v.status === 'ACTIVE') || state.versions[state.versions.length - 1];
+      document.getElementById('metric-version').textContent = activeVer ? activeVer.version_id : 'v1.0.0';
 
-      const banner = document.getElementById('alert-banner');
-      banner.className = `alert-banner alert-${impact_report.overall_severity}`;
-      document.getElementById('alert-text').textContent =
-        impact_report.total_changes === 0
-          ? 'Real-Time Alert: Zero schema drift detected. Pipeline healthy.'
-          : `Real-Time Alert [${impact_report.overall_severity}]: ${impact_report.total_changes} schema mutation(s) detected (Max Risk Score: ${impact_report.max_risk_score}/100).`;
+      const imp = ana.impact_analysis;
+      document.getElementById('metric-risk').textContent = `${imp.overall_risk} (${imp.max_risk_score})`;
+      document.getElementById('metric-changes').textContent = imp.changes.length;
+      document.getElementById('metric-rows').textContent = state.target_rows.length;
 
-      document.querySelector('#src-table tbody').innerHTML = source_schema.columns.map(c =>
-        `<tr><td>${c.name}</td><td>${c.raw_type}</td><td>${c.normalized_type}</td><td>${c.primary_key ? 'PK' : ''}</td></tr>`
+      document.getElementById('source-schema').innerHTML = ana.source_schema.columns.map(c =>
+        `<div class="flex justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <span class="font-mono text-white">${c.name} ${c.is_primary_key ? '<span class="text-amber-400 text-xs">[PK]</span>' : ''}</span>
+          <span class="text-slate-400">${c.data_type} (${c.normalized_type}) &bull; ${c.nullable ? 'NULL' : 'NOT NULL'}</span>
+        </div>`
       ).join('');
 
-      document.querySelector('#tgt-table tbody').innerHTML = target_schema.columns.map(c =>
-        `<tr><td>${c.name}</td><td>${c.raw_type}</td><td>${c.normalized_type}</td><td>${c.primary_key ? 'PK' : ''}</td></tr>`
+      document.getElementById('target-schema').innerHTML = ana.target_schema.columns.map(c =>
+        `<div class="flex justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <span class="font-mono text-white">${c.name} ${c.is_primary_key ? '<span class="text-amber-400 text-xs">[PK]</span>' : ''}</span>
+          <span class="text-slate-400">${c.data_type} (${c.normalized_type}) &bull; ${c.nullable ? 'NULL' : 'NOT NULL'}</span>
+        </div>`
       ).join('');
 
-      document.querySelector('#diff-table tbody').innerHTML = impact_report.changes.length
-        ? impact_report.changes.map(ch => `
-            <tr>
-              <td>${ch.change_type}</td>
-              <td>${ch.target_column || ''} &rarr; ${ch.source_column || '(dropped)'}</td>
-              <td>${ch.old_type || '-'} &rarr; ${ch.new_type || '-'}</td>
-              <td>${ch.risk_score}/100</td>
-              <td><span class="badge ${ch.severity}">${ch.severity}</span></td>
-            </tr>`).join('')
-        : '<tr><td colspan="5" style="color:#9ca3af;">No schema drift detected.</td></tr>';
+      document.getElementById('impacted-views').textContent =
+        'Downstream Impacted Assets: ' + (imp.impacted_downstream_assets.length ? imp.impacted_downstream_assets.join(', ') : 'None');
 
-      latestSuggestedMappings = impact_report.suggested_mappings || {};
-      const applyBtn = document.getElementById('apply-rec-btn');
-      applyBtn.style.display = Object.keys(latestSuggestedMappings).length ? 'inline-block' : 'none';
-
-      document.getElementById('rec-list').innerHTML = (impact_report.recommendations || []).map(r =>
-        `<div class="rec-box">${r}</div>`
-      ).join('');
-
-      document.querySelector('#ver-table tbody').innerHTML = verRes.map(v => `
-        <tr>
-          <td><strong>${v.version_id}</strong></td>
-          <td><code>${v.schema_hash}</code></td>
-          <td>${v.columns.length} cols</td>
-          <td>${v.created_at.slice(0, 19)}Z</td>
-          <td><button onclick="rollback('${v.version_id}')">Rollback</button></td>
-        </tr>`).join('');
-
-      const vOpts = verRes.map(v => `<option value="${v.version_id}">${v.version_id} (${v.columns.length} cols)</option>`).join('');
-      const sel1 = document.getElementById('cmp-v1');
-      const sel2 = document.getElementById('cmp-v2');
-      const prev1 = sel1.value, prev2 = sel2.value;
-      sel1.innerHTML = vOpts;
-      sel2.innerHTML = vOpts;
-      if (prev1) sel1.value = prev1;
-      if (verRes.length > 1) sel2.value = prev2 || verRes[verRes.length - 1].version_id;
-
-      if (auditRes.length) {
-        const latest = auditRes[auditRes.length - 1];
-        document.getElementById('kpi-latency').textContent = `${latest.duration_ms} ms`;
-        document.getElementById('kpi-dq').textContent = `${(latest.data_quality_score ?? 100).toFixed(1)}%`;
-
-        const recent = auditRes.slice(-5);
-        const maxMs = Math.max(...recent.map(a => a.duration_ms), 10);
-        document.getElementById('perf-bars').innerHTML = recent.map(a => `
-          <div class="bar-row">
-            <span style="width:115px; font-family:monospace;">${a.batch_id}</span>
-            <div class="bar-track"><div class="bar-fill" style="width:${Math.max((a.duration_ms / maxMs) * 100, 6)}%"></div></div>
-            <span style="width:75px; text-align:right;">${a.duration_ms} ms</span>
-          </div>`).join('');
-      }
-
-      document.querySelector('#audit-table tbody').innerHTML = auditRes.slice().reverse().map(a => `
-        <tr>
-          <td><code>${a.batch_id}</code></td>
-          <td>${a.schema_version}</td>
-          <td><span class="badge ${a.status}">${a.status}</span></td>
-          <td>+${a.rows_inserted} / ~${a.rows_updated} / !${a.rows_quarantined}</td>
-          <td>${(a.data_quality_score ?? 100).toFixed(1)}%</td>
-          <td>${a.duration_ms} ms</td>
-          <td>${a.notes}</td>
-        </tr>`).join('');
-    }
-
-    async function compareVersions() {
-      const v1 = document.getElementById('cmp-v1').value;
-      const v2 = document.getElementById('cmp-v2').value;
-      const res = await fetch(`/api/versions/orders/compare?v1=${v1}&v2=${v2}`).then(r => r.json());
-      if (res.diff.identical) {
-        document.getElementById('cmp-result').innerHTML = `<strong>${v1}</strong> and <strong>${v2}</strong> have identical structural schemas.`;
+      if (!imp.changes.length) {
+        document.getElementById('changes-list').innerHTML = '<div class="text-slate-400">Schemas are synchronized. No pending drift.</div>';
       } else {
-        document.getElementById('cmp-result').innerHTML = `
-          <div><strong>Added in ${v2}:</strong> ${res.diff.added_columns.join(', ') || 'None'}</div>
-          <div><strong>Removed from ${v1}:</strong> ${res.diff.removed_columns.join(', ') || 'None'}</div>
-          <div><strong>Type Shifts:</strong> ${res.diff.type_changes.map(t => `${t.column} (${t.from}&rarr;${t.to})`).join(', ') || 'None'}</div>
-        `;
+        document.getElementById('changes-list').innerHTML = imp.changes.map(ch => `
+          <div class="p-4 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-bold text-indigo-300">${ch.change_id}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-slate-700">${ch.change_type}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold ${ch.risk_level === 'LOW' ? 'bg-emerald-900 text-emerald-300' : 'bg-rose-900 text-rose-300'}">${ch.risk_level} (${ch.risk_score})</span>
+              </div>
+              <div class="text-slate-200 mt-1">Column: <code>${ch.source_column || ch.target_column}</code> ${ch.old_type && ch.new_type ? `(${ch.old_type} &rarr; ${ch.new_type})` : ''}</div>
+              <div class="text-xs text-slate-400 mt-1">${ch.recommended_action}</div>
+            </div>
+            <div class="text-xs font-semibold ${ch.auto_approved ? 'text-emerald-400' : 'text-amber-400'}">
+              ${ch.auto_approved ? 'AUTO-APPROVED' : 'APPROVAL REQUIRED'}
+            </div>
+          </div>
+        `).join('');
       }
+
+      document.getElementById('versions-list').innerHTML = state.versions.slice().reverse().map(v => `
+        <div class="flex items-center justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <div>
+            <span class="font-mono font-bold text-indigo-300">${v.version_id}</span>
+            <span class="text-xs text-slate-400 ml-2">hash: ${v.schema_hash}</span>
+            <span class="ml-2 text-xs px-2 py-0.5 rounded ${v.status === 'ACTIVE' ? 'bg-emerald-900 text-emerald-300' : 'bg-slate-700 text-slate-400'}">${v.status}</span>
+          </div>
+          ${v.status !== 'ACTIVE' ? `<button onclick="rollback('${v.version_id}')" class="px-2.5 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 text-xs">Rollback</button>` : ''}
+        </div>
+      `).join('');
+
+      if (state.target_rows.length) {
+        const cols = Object.keys(state.target_rows[0]);
+        document.getElementById('target-data').innerHTML = `
+          <table class="w-full text-left border-collapse">
+            <thead><tr class="border-b border-slate-700 text-slate-400">${cols.map(c => `<th class="py-1.5 pr-3">${c}</th>`).join('')}</tr></thead>
+            <tbody class="divide-y divide-slate-800">${state.target_rows.map(r => `<tr>${cols.map(c => `<td class="py-1.5 pr-3 font-mono">${r[c] ?? 'NULL'}</td>`).join('')}</tr>`).join('')}</tbody>
+          </table>`;
+      }
+
+      document.getElementById('audit-body').innerHTML = state.audit_logs.map(a => `
+        <tr>
+          <td class="py-2 pr-3 font-mono text-indigo-300">${a.batch_id}</td>
+          <td class="py-2 pr-3 font-semibold ${a.status === 'SUCCESS' ? 'text-emerald-400' : 'text-rose-400'}">${a.status}</td>
+          <td class="py-2 pr-3 font-mono">${a.schema_version}</td>
+          <td class="py-2 pr-3">${a.rows_read} / ${a.rows_inserted} / ${a.rows_updated}</td>
+          <td class="py-2 pr-3">${a.duration_ms} ms</td>
+          <td class="py-2 pr-3 font-mono text-slate-400">${a.checksum}</td>
+          <td class="py-2 text-slate-300">${a.notes}</td>
+        </tr>
+      `).join('');
     }
 
-    async function applyRecommendedMappings() {
-      await fetch('/api/merge', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          table_name: 'orders',
-          policy: 'FORCE_OVERRIDE',
-          column_mappings: latestSuggestedMappings
-        })
-      });
-      await refreshAll();
+    async function resetDemo() {
+      const r = await fetch('/api/reset', { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Baseline reset complete. Active version: ${d.active_version}`, 'info');
+      refreshAll();
     }
 
-    async function runScenario(name) {
-      await fetch(`/api/demo/scenario/${name}`, { method: 'POST' });
-      await refreshAll();
+    async function simulate(scenario) {
+      const r = await fetch(`/api/simulate/${scenario}`, { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Simulated: ${d.description}`, scenario === 'breaking_drift' ? 'error' : 'info');
+      refreshAll();
     }
 
     async function runMerge(policy) {
-      await fetch('/api/merge', {
+      const r = await fetch('/api/merge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ table_name: 'orders', policy })
       });
-      await refreshAll();
+      const d = await r.json();
+      showBanner(`${d.status}: ${d.notes} (${d.duration_ms} ms)`, d.status === 'SUCCESS' ? 'success' : 'error');
+      refreshAll();
     }
 
-    async function rollback(versionId) {
-      await fetch(`/api/rollback/orders/${versionId}`, { method: 'POST' });
-      await refreshAll();
+    async function rollback(ver) {
+      const r = await fetch(`/api/rollback/orders/${ver}`, { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Rolled back to ${d.restored_version}. New active version: ${d.new_active_version}`, 'info');
+      refreshAll();
     }
 
     refreshAll();

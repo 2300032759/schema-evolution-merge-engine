@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -13,37 +14,31 @@ class ChangeType(str, Enum):
     NULLABILITY_RELAXED = "NULLABILITY_RELAXED"
 
 
-class Severity(str, Enum):
-    SAFE = "SAFE"
-    WARNING = "WARNING"
-    BREAKING = "BREAKING"
+class RiskLevel(str, Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
 
 
 class MergePolicy(str, Enum):
-    STRICT = "STRICT"
-    STRICT_BLOCK_BREAKING = "STRICT"
-    LENIENT = "LENIENT"
+    AUTO_EVOLVE_SAFE = "AUTO_EVOLVE_SAFE"
+    STRICT_BLOCK_BREAKING = "STRICT_BLOCK_BREAKING"
     FORCE_OVERRIDE = "FORCE_OVERRIDE"
 
 
 class ColumnDef(BaseModel):
     name: str
-    raw_type: str
+    data_type: str
     normalized_type: str
     nullable: bool = True
-    primary_key: bool = False
-    default_value: Optional[str] = None
-
-    @property
-    def is_primary_key(self) -> bool:
-        return self.primary_key
+    is_primary_key: bool = False
 
 
 class TableSchema(BaseModel):
-    database: str
+    warehouse: str
     table_name: str
     columns: List[ColumnDef]
-    row_count: int = 0
 
 
 class SchemaChange(BaseModel):
@@ -55,62 +50,41 @@ class SchemaChange(BaseModel):
     new_type: Optional[str] = None
     old_nullable: Optional[bool] = None
     new_nullable: Optional[bool] = None
-    similarity_score: Optional[float] = None
-    severity: Severity = Severity.SAFE
-    risk_score: int = Field(default=0, ge=0, le=100)
-    affected_views: List[str] = []
-    recommendation: str = ""
+    similarity_score: float = 0.0
+    risk_level: RiskLevel = RiskLevel.LOW
+    risk_score: int = 0
+    impacted_dependencies: List[str] = Field(default_factory=list)
+    recommended_action: str = ""
     auto_approved: bool = True
 
 
-class RiskLevel(str, Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-
-
-class ImpactReport(BaseModel):
+class ImpactSummary(BaseModel):
     table_name: str
-    total_changes: int
-    overall_severity: Severity
+    overall_risk: RiskLevel
     max_risk_score: int
-    changes: List[SchemaChange]
-    recommendations: List[str] = []
-    suggested_mappings: Dict[str, str] = {}
+    breaking_changes_count: int
+    safe_changes_count: int
+    impacted_downstream_assets: List[str]
     can_auto_merge: bool
-
-    @property
-    def overall_risk(self) -> RiskLevel:
-        if self.overall_severity == Severity.BREAKING:
-            return RiskLevel.HIGH
-        if self.overall_severity == Severity.WARNING and not self.can_auto_merge:
-            return RiskLevel.MEDIUM
-        return RiskLevel.LOW
-
-    @property
-    def impacted_downstream_assets(self) -> List[str]:
-        assets = []
-        for chg in self.changes:
-            for v in chg.affected_views:
-                if v not in assets:
-                    assets.append(v)
-        return assets
-
-class MergeRequest(BaseModel):
-    table_name: str = "orders"
-    policy: MergePolicy = MergePolicy.STRICT
-    approved_change_ids: List[str] = []
-    column_mappings: Dict[str, str] = {}
+    changes: List[SchemaChange]
 
 
 class SchemaVersionRecord(BaseModel):
     version_id: str
     table_name: str
+    version_number: int
     schema_hash: str
-    status: str = "ACTIVE"
-    created_at: str
     columns: List[ColumnDef]
-    applied_changes: List[Dict[str, Any]] = []
+    changes_applied: List[Dict[str, Any]]
+    created_at: str
+    status: str = "ACTIVE"
+
+
+class MergeRequest(BaseModel):
+    table_name: str = "orders"
+    policy: MergePolicy = MergePolicy.STRICT_BLOCK_BREAKING
+    column_mappings: Dict[str, str] = Field(default_factory=dict)
+    approved_change_ids: List[str] = Field(default_factory=list)
 
 
 class MergeAuditRecord(BaseModel):
@@ -123,9 +97,8 @@ class MergeAuditRecord(BaseModel):
     rows_inserted: int
     rows_updated: int
     rows_quarantined: int
-    data_quality_score: float = 100.0
-    watermark_before: Optional[str] = None
-    watermark_after: Optional[str] = None
+    watermark_before: Optional[str]
+    watermark_after: Optional[str]
     checksum: str
     duration_ms: float
     executed_at: str

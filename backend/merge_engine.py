@@ -41,9 +41,8 @@ class CrossWarehouseMergeEngine:
     def analyze_table(self, table_name: str, explicit_mappings: Dict[str, str] | None = None):
         src_schema = self.wm.inspect_source_schema(table_name)
         tgt_schema = self.wm.inspect_target_schema(table_name)
-        target_views = self.wm.inspect_target_views()
         changes = self.detector.detect_changes(src_schema, tgt_schema, explicit_mappings)
-        impact = self.analyzer.evaluate(table_name, changes, target_views)
+        impact = self.analyzer.evaluate(table_name, changes)
         return src_schema, tgt_schema, impact
 
     def execute_incremental_merge(self, req: MergeRequest) -> MergeAuditRecord:
@@ -81,7 +80,6 @@ class CrossWarehouseMergeEngine:
                 rows_inserted=0,
                 rows_updated=0,
                 rows_quarantined=len(blocked_changes),
-                data_quality_score=0.0,
                 watermark_before=wm_before,
                 watermark_after=wm_before,
                 checksum="N/A",
@@ -93,7 +91,7 @@ class CrossWarehouseMergeEngine:
             self.registry.append_audit_log(audit.model_dump())
             return audit
 
-        # Apply approved DDL migrations & set-based staging UPSERT to Target Warehouse (DuckDB)
+        # Apply approved DDL migrations to Target Warehouse (DuckDB)
         effective_mappings = dict(req.column_mappings)
         con = self.wm.get_target_conn()
         try:
@@ -120,20 +118,19 @@ class CrossWarehouseMergeEngine:
                     effective_mappings[chg.source_column] = chg.target_column
 
                 elif chg.change_type == ChangeType.DROP_COLUMN and chg.target_column:
+                    # Non-destructive soft deprecation: retain column in warehouse with NULLs for missing source values
                     pass
 
+            # Fetch incremental rows from source using watermark
             delta_rows = self.wm.fetch_source_incremental(req.table_name, "updated_at", wm_before)
             info = con.execute(f"PRAGMA table_info('{req.table_name}')").fetchall()
             tgt_col_names = [r[1] for r in info]
-            non_null_cols = [r[1] for r in info if r[3]]
             pk_cols = [r[1] for r in info if r[5]] or [tgt_col_names[0]]
             pk_col = pk_cols[0]
 
             rows_inserted = 0
             rows_updated = 0
-            rows_rejected_dq = 0
             wm_after = wm_before
-            valid_mapped_rows = []
 
             for row in delta_rows:
                 mapped_row = {}
@@ -142,52 +139,30 @@ class CrossWarehouseMergeEngine:
                     if tgt_k in tgt_col_names:
                         mapped_row[tgt_k] = val
 
-                # Data quality validation: ensure primary key and NOT NULL fields are present
-                if pk_col not in mapped_row or mapped_row[pk_col] is None:
-                    rows_rejected_dq += 1
-                    continue
-                if any(mapped_row.get(c) is None for c in non_null_cols if c in mapped_row):
-                    rows_rejected_dq += 1
+                if pk_col not in mapped_row:
                     continue
 
-                valid_mapped_rows.append(mapped_row)
+                exists = con.execute(
+                    f"SELECT COUNT(*) FROM {req.table_name} WHERE {pk_col} = ?",
+                    [mapped_row[pk_col]],
+                ).fetchone()[0]
+
+                cols = list(mapped_row.keys())
+                vals = [mapped_row[c] for c in cols]
+
+                if exists:
+                    set_clause = ", ".join(f"{c} = ?" for c in cols if c != pk_col)
+                    update_vals = [mapped_row[c] for c in cols if c != pk_col] + [mapped_row[pk_col]]
+                    con.execute(f"UPDATE {req.table_name} SET {set_clause} WHERE {pk_col} = ?", update_vals)
+                    rows_updated += 1
+                else:
+                    placeholders = ", ".join("?" for _ in cols)
+                    con.execute(f"INSERT INTO {req.table_name} ({', '.join(cols)}) VALUES ({placeholders})", vals)
+                    rows_inserted += 1
+
                 row_wm = str(row.get("updated_at"))
                 if not wm_after or row_wm > wm_after:
                     wm_after = row_wm
-
-            if valid_mapped_rows:
-                active_cols = list(valid_mapped_rows[0].keys())
-                col_list_str = ", ".join(active_cols)
-                placeholders = ", ".join("?" for _ in active_cols)
-
-                # Vectorized set-based staging table upsert
-                con.execute(f"CREATE TEMP TABLE _stage_delta AS SELECT {col_list_str} FROM {req.table_name} WHERE 1=0")
-                con.executemany(
-                    f"INSERT INTO _stage_delta ({col_list_str}) VALUES ({placeholders})",
-                    [[r.get(c) for c in active_cols] for r in valid_mapped_rows],
-                )
-
-                rows_updated = con.execute(
-                    f"SELECT COUNT(*) FROM _stage_delta s JOIN {req.table_name} t ON s.{pk_col} = t.{pk_col}"
-                ).fetchone()[0]
-                rows_inserted = len(valid_mapped_rows) - rows_updated
-
-                non_pk_cols = [c for c in active_cols if c != pk_col]
-                if non_pk_cols and rows_updated > 0:
-                    set_expr = ", ".join(f"{c} = s.{c}" for c in non_pk_cols)
-                    con.execute(
-                        f"UPDATE {req.table_name} AS t SET {set_expr} FROM _stage_delta AS s WHERE t.{pk_col} = s.{pk_col}"
-                    )
-
-                if rows_inserted > 0:
-                    con.execute(
-                        f"""
-                        INSERT INTO {req.table_name} ({col_list_str})
-                        SELECT {col_list_str} FROM _stage_delta s
-                        WHERE NOT EXISTS (SELECT 1 FROM {req.table_name} t WHERE t.{pk_col} = s.{pk_col})
-                        """
-                    )
-                con.execute("DROP TABLE _stage_delta")
 
             con.execute("COMMIT")
         except Exception as exc:
@@ -196,12 +171,7 @@ class CrossWarehouseMergeEngine:
         finally:
             con.close()
 
-        dq_score = (
-            round((len(valid_mapped_rows) / len(delta_rows)) * 100.0, 2)
-            if delta_rows
-            else 100.0
-        )
-
+        # Register new schema version if schema evolved
         final_tgt_schema = self.wm.inspect_target_schema(req.table_name)
         ver_rec = self.registry.register_version(
             req.table_name,
@@ -223,14 +193,13 @@ class CrossWarehouseMergeEngine:
             rows_read=len(delta_rows),
             rows_inserted=rows_inserted,
             rows_updated=rows_updated,
-            rows_quarantined=rows_rejected_dq,
-            data_quality_score=dq_score,
+            rows_quarantined=0,
             watermark_before=wm_before,
             watermark_after=wm_after,
             checksum=checksum,
             duration_ms=duration_ms,
             executed_at=datetime.now(timezone.utc).isoformat(),
-            notes=f"Applied {len(approved_changes)} schema change(s); merged {rows_inserted} inserts, {rows_updated} updates (DQ={dq_score}%).",
+            notes=f"Applied {len(approved_changes)} schema change(s); merged {rows_inserted} inserts, {rows_updated} updates.",
         )
         self.registry.append_audit_log(audit.model_dump())
         return audit
@@ -253,9 +222,11 @@ class CrossWarehouseMergeEngine:
             pk_names = {r[1] for r in current_info if r[5]}
             target_cols = {c.name: c for c in target_ver.columns}
 
+            # Drop columns added after target_version
             for col_name in current_cols - set(target_cols.keys()):
                 con.execute(f"ALTER TABLE {table_name} DROP COLUMN {col_name}")
 
+            # Revert column types (skip PRIMARY KEY columns and unchanged types)
             for col_name, col_def in target_cols.items():
                 if col_name in current_cols and col_name not in pk_names:
                     duck_type = NORMALIZED_TO_DUCKDB.get(col_def.normalized_type, "VARCHAR")
