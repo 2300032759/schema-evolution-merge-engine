@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Schema-Evolution & Cross-Warehouse Merge Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+  <div class="max-w-7xl mx-auto px-6 py-8">
+    <!-- Header -->
+    <div class="flex flex-col md:flex-row md:items-center md:justify-between border-b border-slate-800 pb-6 mb-8 gap-4">
+      <div>
+        
+        <h1 class="text-2xl md:text-3xl font-bold text-white mt-1">Intelligent Schema-Evolution & Cross-Warehouse Merge Engine</h1>
+        <p class="text-slate-400 text-sm mt-1">Source OLTP (SQLite) &rarr; Diff &amp; Risk Policy Gate &rarr; Target OLAP Warehouse (DuckDB)</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button onclick="resetDemo()" class="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-sm font-medium border border-slate-700">1. Reset Baseline (v1)</button>
+        <button onclick="simulate('safe_evolution')" class="px-4 py-2 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-600/40 text-sm font-medium">2A. Simulate Safe Drift</button>
+        <button onclick="simulate('breaking_drift')" class="px-4 py-2 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/40 text-sm font-medium">2B. Simulate Breaking Drift</button>
+      </div>
+    </div>
+
+    <!-- Banner Notification -->
+    <div id="banner" class="hidden mb-6 p-4 rounded-xl border text-sm"></div>
+
+    <!-- Top Metrics -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Active Schema Version</div>
+        <div id="metric-version" class="text-2xl font-bold text-indigo-400 mt-1">v1.0.0</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Overall Drift Risk</div>
+        <div id="metric-risk" class="text-2xl font-bold text-emerald-400 mt-1">LOW (0)</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Detected Changes</div>
+        <div id="metric-changes" class="text-2xl font-bold text-white mt-1">0</div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div class="text-xs text-slate-400 uppercase">Target Warehouse Rows</div>
+        <div id="metric-rows" class="text-2xl font-bold text-cyan-400 mt-1">0</div>
+      </div>
+    </div>
+
+    <!-- Schemas Side-by-Side -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Source OLTP Schema (<code class="text-indigo-400">orders</code>)</h2>
+        <div id="source-schema" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Target DuckDB Warehouse Schema (<code class="text-cyan-400">orders</code>)</h2>
+        <div id="target-schema" class="space-y-2 text-sm"></div>
+      </div>
+    </div>
+
+    <!-- Schema Diff & Risk Impact Analysis -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6 mb-8">
+      <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+        <div>
+          <h2 class="text-lg font-semibold text-white">Detected Schema Changes, Risk Scoring &amp; Impact Analysis</h2>
+          <p id="impacted-views" class="text-xs text-amber-400 mt-1">Downstream Impacted Assets: None</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="runMerge('STRICT_BLOCK_BREAKING')" class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold">3. Execute Safe Incremental Merge</button>
+          <button onclick="runMerge('FORCE_OVERRIDE')" class="px-4 py-2 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/40 text-sm font-medium">Force Override &amp; Map</button>
+        </div>
+      </div>
+      <div id="changes-list" class="space-y-3 text-sm text-slate-300">No schema drift detected.</div>
+    </div>
+
+    <!-- Schema Version History & Target Data Preview -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <h2 class="text-lg font-semibold text-white mb-3">Immutable Schema Registry &amp; Rollback</h2>
+        <div id="versions-list" class="space-y-2 text-sm"></div>
+      </div>
+      <div class="bg-slate-900 border border-slate-800 rounded-xl p-5 overflow-x-auto">
+        <h2 class="text-lg font-semibold text-white mb-3">Target Warehouse Live Data (<code class="text-cyan-400">DuckDB</code>)</h2>
+        <div id="target-data" class="text-xs"></div>
+      </div>
+    </div>
+
+    <!-- Audit Log -->
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-6">
+      <h2 class="text-lg font-semibold text-white mb-4">Incremental Merge &amp; Policy Audit Log</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs">
+          <thead class="text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="py-2 pr-3">Batch ID</th>
+              <th class="py-2 pr-3">Status</th>
+              <th class="py-2 pr-3">Schema Ver</th>
+              <th class="py-2 pr-3">Read / Ins / Upd</th>
+              <th class="py-2 pr-3">Latency</th>
+              <th class="py-2 pr-3">Checksum</th>
+              <th class="py-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody id="audit-body" class="divide-y divide-slate-800"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function showBanner(msg, type = 'info') {
+      const b = document.getElementById('banner');
+      b.className = 'mb-6 p-4 rounded-xl border text-sm ' + (
+        type === 'error' ? 'bg-rose-950/60 border-rose-700 text-rose-200' :
+        type === 'success' ? 'bg-emerald-950/60 border-emerald-700 text-emerald-200' :
+        'bg-indigo-950/60 border-indigo-700 text-indigo-200'
+      );
+      b.textContent = msg;
+      b.classList.remove('hidden');
+    }
+
+    async function refreshAll() {
+      const [anaRes, stateRes] = await Promise.all([
+        fetch('/api/analyze/orders'),
+        fetch('/api/state/orders')
+      ]);
+      const ana = await anaRes.json();
+      const state = await stateRes.json();
+
+      const activeVer = state.versions.find(v => v.status === 'ACTIVE') || state.versions[state.versions.length - 1];
+      document.getElementById('metric-version').textContent = activeVer ? activeVer.version_id : 'v1.0.0';
+
+      const imp = ana.impact_analysis;
+      document.getElementById('metric-risk').textContent = `${imp.overall_risk} (${imp.max_risk_score})`;
+      document.getElementById('metric-changes').textContent = imp.changes.length;
+      document.getElementById('metric-rows').textContent = state.target_rows.length;
+
+      document.getElementById('source-schema').innerHTML = ana.source_schema.columns.map(c =>
+        `<div class="flex justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <span class="font-mono text-white">${c.name} ${c.is_primary_key ? '<span class="text-amber-400 text-xs">[PK]</span>' : ''}</span>
+          <span class="text-slate-400">${c.data_type} (${c.normalized_type}) &bull; ${c.nullable ? 'NULL' : 'NOT NULL'}</span>
+        </div>`
+      ).join('');
+
+      document.getElementById('target-schema').innerHTML = ana.target_schema.columns.map(c =>
+        `<div class="flex justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <span class="font-mono text-white">${c.name} ${c.is_primary_key ? '<span class="text-amber-400 text-xs">[PK]</span>' : ''}</span>
+          <span class="text-slate-400">${c.data_type} (${c.normalized_type}) &bull; ${c.nullable ? 'NULL' : 'NOT NULL'}</span>
+        </div>`
+      ).join('');
+
+      document.getElementById('impacted-views').textContent =
+        'Downstream Impacted Assets: ' + (imp.impacted_downstream_assets.length ? imp.impacted_downstream_assets.join(', ') : 'None');
+
+      if (!imp.changes.length) {
+        document.getElementById('changes-list').innerHTML = '<div class="text-slate-400">Schemas are synchronized. No pending drift.</div>';
+      } else {
+        document.getElementById('changes-list').innerHTML = imp.changes.map(ch => `
+          <div class="p-4 rounded-lg bg-slate-800/80 border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-mono font-bold text-indigo-300">${ch.change_id}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold bg-slate-700">${ch.change_type}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold ${ch.risk_level === 'LOW' ? 'bg-emerald-900 text-emerald-300' : 'bg-rose-900 text-rose-300'}">${ch.risk_level} (${ch.risk_score})</span>
+              </div>
+              <div class="text-slate-200 mt-1">Column: <code>${ch.source_column || ch.target_column}</code> ${ch.old_type && ch.new_type ? `(${ch.old_type} &rarr; ${ch.new_type})` : ''}</div>
+              <div class="text-xs text-slate-400 mt-1">${ch.recommended_action}</div>
+            </div>
+            <div class="text-xs font-semibold ${ch.auto_approved ? 'text-emerald-400' : 'text-amber-400'}">
+              ${ch.auto_approved ? 'AUTO-APPROVED' : 'APPROVAL REQUIRED'}
+            </div>
+          </div>
+        `).join('');
+      }
+
+      document.getElementById('versions-list').innerHTML = state.versions.slice().reverse().map(v => `
+        <div class="flex items-center justify-between bg-slate-800/70 px-3 py-2 rounded">
+          <div>
+            <span class="font-mono font-bold text-indigo-300">${v.version_id}</span>
+            <span class="text-xs text-slate-400 ml-2">hash: ${v.schema_hash}</span>
+            <span class="ml-2 text-xs px-2 py-0.5 rounded ${v.status === 'ACTIVE' ? 'bg-emerald-900 text-emerald-300' : 'bg-slate-700 text-slate-400'}">${v.status}</span>
+          </div>
+          ${v.status !== 'ACTIVE' ? `<button onclick="rollback('${v.version_id}')" class="px-2.5 py-1 rounded bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 text-xs">Rollback</button>` : ''}
+        </div>
+      `).join('');
+
+      if (state.target_rows.length) {
+        const cols = Object.keys(state.target_rows[0]);
+        document.getElementById('target-data').innerHTML = `
+          <table class="w-full text-left border-collapse">
+            <thead><tr class="border-b border-slate-700 text-slate-400">${cols.map(c => `<th class="py-1.5 pr-3">${c}</th>`).join('')}</tr></thead>
+            <tbody class="divide-y divide-slate-800">${state.target_rows.map(r => `<tr>${cols.map(c => `<td class="py-1.5 pr-3 font-mono">${r[c] ?? 'NULL'}</td>`).join('')}</tr>`).join('')}</tbody>
+          </table>`;
+      }
+
+      document.getElementById('audit-body').innerHTML = state.audit_logs.map(a => `
+        <tr>
+          <td class="py-2 pr-3 font-mono text-indigo-300">${a.batch_id}</td>
+          <td class="py-2 pr-3 font-semibold ${a.status === 'SUCCESS' ? 'text-emerald-400' : 'text-rose-400'}">${a.status}</td>
+          <td class="py-2 pr-3 font-mono">${a.schema_version}</td>
+          <td class="py-2 pr-3">${a.rows_read} / ${a.rows_inserted} / ${a.rows_updated}</td>
+          <td class="py-2 pr-3">${a.duration_ms} ms</td>
+          <td class="py-2 pr-3 font-mono text-slate-400">${a.checksum}</td>
+          <td class="py-2 text-slate-300">${a.notes}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function resetDemo() {
+      const r = await fetch('/api/reset', { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Baseline reset complete. Active version: ${d.active_version}`, 'info');
+      refreshAll();
+    }
+
+    async function simulate(scenario) {
+      const r = await fetch(`/api/simulate/${scenario}`, { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Simulated: ${d.description}`, scenario === 'breaking_drift' ? 'error' : 'info');
+      refreshAll();
+    }
+
+    async function runMerge(policy) {
+      const r = await fetch('/api/merge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table_name: 'orders', policy })
+      });
+      const d = await r.json();
+      showBanner(`${d.status}: ${d.notes} (${d.duration_ms} ms)`, d.status === 'SUCCESS' ? 'success' : 'error');
+      refreshAll();
+    }
+
+    async function rollback(ver) {
+      const r = await fetch(`/api/rollback/orders/${ver}`, { method: 'POST' });
+      const d = await r.json();
+      showBanner(`Rolled back to ${d.restored_version}. New active version: ${d.new_active_version}`, 'info');
+      refreshAll();
+    }
+
+    refreshAll();
+  </script>
+</body>
+</html>
