@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from backend.demo_simulator import apply_drift_scenario
 from backend.merge_engine import CrossWarehouseMergeEngine
 from backend.models import MergeRequest
 from backend.schema_registry import SchemaRegistry
@@ -15,6 +14,68 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "fronten
 wm = WarehouseManager()
 registry = SchemaRegistry()
 engine = CrossWarehouseMergeEngine(wm=wm, registry=registry)
+
+
+def apply_drift_scenario(scenario_name: str, warehouse_mgr: WarehouseManager) -> dict:
+    with warehouse_mgr.get_source_conn() as scon:
+        cols = [r["name"] for r in scon.execute("PRAGMA table_info('orders')").fetchall()]
+        if scenario_name == "safe_evolution":
+            if "loyalty_tier" not in cols:
+                scon.execute("ALTER TABLE orders ADD COLUMN loyalty_tier TEXT DEFAULT 'STANDARD'")
+            scon.execute("DROP TABLE IF EXISTS _orders_tmp")
+            scon.execute("""
+                CREATE TABLE _orders_tmp (
+                    order_id INTEGER PRIMARY KEY,
+                    customer_email TEXT NOT NULL,
+                    region_code TEXT NOT NULL,
+                    order_amount REAL NOT NULL,
+                    order_status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    loyalty_tier TEXT DEFAULT 'STANDARD'
+                )
+            """)
+            scon.execute("""
+                INSERT INTO _orders_tmp (order_id, customer_email, region_code, order_amount, order_status, updated_at, loyalty_tier)
+                SELECT order_id, customer_email, region_code, CAST(order_amount AS REAL), order_status, updated_at,
+                       COALESCE(loyalty_tier, 'STANDARD')
+                FROM orders
+            """)
+            scon.execute("DROP TABLE orders")
+            scon.execute("ALTER TABLE _orders_tmp RENAME TO orders")
+            scon.execute("""
+                INSERT OR REPLACE INTO orders VALUES
+                (1005, 'sneha.reddy@klef.in', 'SOUTH', 4599.75, 'CONFIRMED', '2026-11-26T10:00:00', 'PLATINUM')
+            """)
+            scon.commit()
+            return {"status": "applied", "scenario": "safe_evolution"}
+
+        if scenario_name == "breaking_drift":
+            scon.execute("DROP TABLE IF EXISTS _orders_tmp")
+            scon.execute("""
+                CREATE TABLE _orders_tmp (
+                    order_id INTEGER PRIMARY KEY,
+                    cust_email TEXT NOT NULL,
+                    order_amount INTEGER NOT NULL,
+                    order_status TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            email_col = "cust_email" if "cust_email" in cols else "customer_email"
+            scon.execute(f"""
+                INSERT INTO _orders_tmp (order_id, cust_email, order_amount, order_status, updated_at)
+                SELECT order_id, {email_col}, CAST(order_amount AS INTEGER), order_status, updated_at
+                FROM orders
+            """)
+            scon.execute("DROP TABLE orders")
+            scon.execute("ALTER TABLE _orders_tmp RENAME TO orders")
+            scon.execute("""
+                INSERT OR REPLACE INTO orders VALUES
+                (1006, 'vikram.das@klef.in', 1850, 'PROCESSING', '2026-11-26T10:15:00')
+            """)
+            scon.commit()
+            return {"status": "applied", "scenario": "breaking_drift"}
+
+    raise ValueError(f"Unknown scenario: {scenario_name}")
 
 
 @asynccontextmanager
